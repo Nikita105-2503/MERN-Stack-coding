@@ -1,0 +1,378 @@
+// Combined_Backend_Frontend_Single_File.txt
+
+/*
+----------------------------------------
+Backend (Express and MongoDB)
+----------------------------------------
+*/
+
+// Step 1: Initialize Node.js project
+// Command: `npm init -y`
+// Command: `npm install express mongoose axios`
+
+const express = require('express');
+const mongoose = require('mongoose');
+const axios = require('axios');
+const app = express();
+app.use(express.json());
+
+// Connect to MongoDB
+mongoose.connect('mongodb://localhost:27017/transactions', { useNewUrlParser: true, useUnifiedTopology: true });
+
+// Define the Transaction Schema
+const transactionSchema = new mongoose.Schema({
+    id: Number,
+    title: String,
+    price: Number,
+    description: String,
+    category: String,
+    dateOfSale: Date,
+    sold: Boolean
+});
+
+const Transaction = mongoose.model('Transaction', transactionSchema);
+
+// Fetch and seed data from third-party API
+app.get('/api/seed', async (req, res) => {
+    try {
+        const response = await axios.get('https://s3.amazonaws.com/roxiler.com/product_transaction.json');
+        const data = response.data;
+        await Transaction.insertMany(data);
+        res.send('Database seeded successfully');
+    } catch (error) {
+        res.status(500).send('Error seeding database');
+    }
+});
+
+// Transactions List API with Search and Pagination
+app.get('/api/transactions', async (req, res) => {
+    const { page = 1, perPage = 10, search = '', month } = req.query;
+    const skip = (page - 1) * perPage;
+
+    const query = {
+        $and: [
+            {
+                dateOfSale: { $gte: new Date(`${month}-01`), $lt: new Date(`${month}-31`) }
+            },
+            {
+                $or: [
+                    { title: { $regex: search, $options: 'i' } },
+                    { description: { $regex: search, $options: 'i' } },
+                    { price: parseFloat(search) || { $exists: true } }
+                ]
+            }
+        ]
+    };
+
+    const transactions = await Transaction.find(query).skip(skip).limit(parseInt(perPage));
+    res.json(transactions);
+});
+
+// Statistics API
+app.get('/api/statistics', async (req, res) => {
+    const { month } = req.query;
+    const start = new Date(`${month}-01`);
+    const end = new Date(`${month}-31`);
+
+    const totalSaleAmount = await Transaction.aggregate([
+        { $match: { dateOfSale: { $gte: start, $lt: end }, sold: true } },
+        { $group: { _id: null, total: { $sum: '$price' } } }
+    ]);
+
+    const totalSoldItems = await Transaction.countDocuments({ dateOfSale: { $gte: start, $lt: end }, sold: true });
+    const totalNotSoldItems = await Transaction.countDocuments({ dateOfSale: { $gte: start, $lt: end }, sold: false });
+
+    res.json({
+        totalSaleAmount: totalSaleAmount[0]?.total || 0,
+        totalSoldItems,
+        totalNotSoldItems
+    });
+});
+
+// Bar Chart API
+app.get('/api/bar-chart', async (req, res) => {
+    const { month } = req.query;
+    const start = new Date(`${month}-01`);
+    const end = new Date(`${month}-31`);
+
+    const priceRanges = [
+        { range: '0-100', min: 0, max: 100 },
+        { range: '101-200', min: 101, max: 200 },
+        { range: '901-above', min: 901, max: Infinity }
+    ];
+
+    const priceRangeData = await Promise.all(priceRanges.map(async ({ range, min, max }) => {
+        const count = await Transaction.countDocuments({ 
+            dateOfSale: { $gte: start, $lt: end }, 
+            price: { $gte: min, $lte: max }
+        });
+        return { range, count };
+    }));
+
+    res.json(priceRangeData);
+});
+
+// Pie Chart API
+app.get('/api/pie-chart', async (req, res) => {
+    const { month } = req.query;
+    const start = new Date(`${month}-01`);
+    const end = new Date(`${month}-31`);
+
+    const categories = await Transaction.aggregate([
+        { $match: { dateOfSale: { $gte: start, $lt: end } } },
+        { $group: { _id: '$category', count: { $sum: 1 } } }
+    ]);
+
+    res.json(categories);
+});
+
+// Combined API
+app.get('/api/combined', async (req, res) => {
+    const { month } = req.query;
+    const [transactions, statistics, barChart, pieChart] = await Promise.all([
+        Transaction.find({ dateOfSale: { $gte: new Date(`${month}-01`), $lt: new Date(`${month}-31`) } }),
+        axios.get(`/api/statistics?month=${month}`),
+        axios.get(`/api/bar-chart?month=${month}`),
+        axios.get(`/api/pie-chart?month=${month}`)
+    ]);
+
+    res.json({
+        transactions,
+        statistics: statistics.data,
+        barChart: barChart.data,
+        pieChart: pieChart.data
+    });
+});
+
+// Start the server
+app.listen(3000, () => {
+    console.log('Server is running on port 3000');
+});
+
+
+/*
+----------------------------------------
+Frontend (React)
+----------------------------------------
+*/
+
+// Step 1: Initialize React project
+// Command: `npx create-react-app transactions-dashboard`
+// Command: `npm install axios chart.js react-chartjs-2`
+
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import TransactionsTable from './TransactionsTable';
+import Statistics from './Statistics';
+import BarChart from './BarChart';
+import PieChart from './PieChart';
+
+function App() {
+  const [month, setMonth] = useState('March');
+  const [transactions, setTransactions] = useState([]);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+
+  const fetchTransactions = async () => {
+    const response = await axios.get(`/api/transactions?month=${month}&search=${search}&page=${page}`);
+    setTransactions(response.data);
+  };
+
+  useEffect(() => {
+    fetchTransactions();
+  }, [month, search, page]);
+
+  return (
+    <div>
+      <h1>Transactions Dashboard</h1>
+      <label>Select Month: </label>
+      <select value={month} onChange={(e) => setMonth(e.target.value)}>
+        <option value="January">January</option>
+        <option value="February">February</option>
+        <option value="March">March</option>
+        <option value="April">April</option>
+        <option value="May">May</option>
+        <option value="June">June</option>
+        <option value="July">July</option>
+        <option value="August">August</option>
+        <option value="September">September</option>
+        <option value="October">October</option>
+        <option value="November">November</option>
+        <option value="December">December</option>
+      </select>
+
+      <input 
+        type="text" 
+        placeholder="Search transactions" 
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      <TransactionsTable transactions={transactions} setPage={setPage} />
+      <Statistics month={month} />
+      <BarChart month={month} />
+      <PieChart month={month} />
+    </div>
+  );
+}
+
+export default App;
+
+
+/*
+Components (React) 
+*/
+
+// TransactionsTable.js
+import React from 'react';
+
+function TransactionsTable({ transactions, setPage }) {
+  return (
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Description</th>
+            <th>Price</th>
+            <th>Date of Sale</th>
+            <th>Sold</th>
+          </tr>
+        </thead>
+        <tbody>
+          {transactions.map((transaction, index) => (
+            <tr key={index}>
+              <td>{transaction.title}</td>
+              <td>{transaction.description}</td>
+              <td>{transaction.price}</td>
+              <td>{new Date(transaction.dateOfSale).toLocaleDateString()}</td>
+              <td>{transaction.sold ? 'Yes' : 'No'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div>
+        <button onClick={() => setPage((prev) => Math.max(prev - 1, 1))}>Previous</button>
+        <button onClick={() => setPage((prev) => prev + 1)}>Next</button>
+      </div>
+    </div>
+  );
+}
+
+export default TransactionsTable;
+
+
+// Statistics.js
+import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+
+function Statistics({ month }) {
+  const [stats, setStats] = useState({ totalSaleAmount: 0, totalSoldItems: 0, totalNotSoldItems: 0 });
+
+  useEffect(() => {
+    const fetchStatistics = async () => {
+      const response = await axios.get(`/api/statistics?month=${month}`);
+      setStats(response.data);
+    };
+
+    fetchStatistics();
+  }, [month]);
+
+  return (
+    <div>
+      <h2>Statistics for {month}</h2>
+      <p>Total Sale Amount: {stats.totalSaleAmount}</p>
+      <p>Total Sold Items: {stats.totalSoldItems}</p>
+      <p>Total Not Sold Items: {stats.totalNotSoldItems}</p>
+    </div>
+  );
+}
+
+export default Statistics;
+
+
+// BarChart.js
+import React, { useEffect, useState } from 'react';
+import { Bar } from 'react-chartjs-2';
+import axios from 'axios';
+
+function BarChart({ month }) {
+  const [chartData, setChartData] = useState({});
+
+  useEffect(() => {
+    const fetchBarChartData = async () => {
+      const response = await axios.get(`/api/bar-chart?month=${month}`);
+      const ranges = response.data.map(item => item.range);
+      const counts = response.data.map(item => item.count);
+
+      setChartData({
+        labels: ranges,
+        datasets: [
+          {
+            label: 'Number of Items',
+            data: counts,
+            backgroundColor: 'rgba(75,192,192,0.6)'
+          }
+        ]
+      });
+    };
+
+    fetchBarChartData();
+  }, [month]);
+
+  return (
+    <div>
+      <h2>Bar Chart for {month}</h2>
+      <Bar data={chartData} />
+    </div>
+  );
+}
+
+export default BarChart;
+
+
+// PieChart.js
+import React, { useEffect, useState } from 'react';
+import { Pie } from 'react-chartjs-2';
+import axios from 'axios';
+
+function PieChart({ month }) {
+  const [chartData, setChartData] = useState({});
+
+  useEffect(() => {
+    const fetchPieChartData = async () => {
+      const response = await axios.get(`/api/pie-chart?month=${month}`);
+      const categories = response.data.map(item => item._id);
+      const counts = response.data.map(item => item.count);
+
+      setChartData({
+        labels: categories,
+        datasets: [
+          {
+            label: 'Number of Items',
+            data: counts,
+            backgroundColor: [
+              '#FF6384',
+              '#36A2EB',
+              '#FFCE56',
+              '#8AFF33',
+              '#FF9F40'
+            ]
+          }
+        ]
+      });
+    };
+
+    fetchPieChartData();
+  }, [month]);
+
+  return (
+    <div>
+      <h2>Pie Chart for {month}</h2>
+      <Pie data={chartData} />
+    </div>
+  );
+}
+
+export default PieChart;
+
